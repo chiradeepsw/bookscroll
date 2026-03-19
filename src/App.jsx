@@ -110,31 +110,23 @@ function coverSrcFromId(coverId, size = "M") {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 // Priority:
-//   1. VITE_API_PROXY_URL set      → Cloudflare Worker proxy (key stays server-side ✅ recommended)
-//   2. VITE_ANTHROPIC_API_KEY set  → direct call (key in JS bundle ⚠️ personal use only)
-//   3. Neither set                 → bare call (works in Claude artifact sandbox)
+//   1. VITE_API_PROXY_URL      → Cloudflare Worker proxy (key stays server-side ✅)
+//   2. VITE_ANTHROPIC_API_KEY  → direct call (key in JS bundle ⚠️ personal use only)
+//   3. Neither                 → bare call (works in Claude artifact sandbox)
 async function fetchBookSummary(title, author) {
-  const proxyUrl = import.meta.env?.VITE_API_PROXY_URL
-  const apiKey   = import.meta.env?.VITE_ANTHROPIC_API_KEY
+  const proxyUrl = import.meta.env?.VITE_API_PROXY_URL;
+  const apiKey   = import.meta.env?.VITE_ANTHROPIC_API_KEY;
 
-  let endpoint, headers
-
+  let endpoint, headers;
   if (proxyUrl) {
-    // Secure: proxy hides the key server-side
-    endpoint = `${proxyUrl}/api/messages`
-    headers  = { "Content-Type": "application/json" }
+    endpoint = `${proxyUrl}/api/messages`;
+    headers  = { "Content-Type": "application/json" };
   } else if (apiKey) {
-    // Fallback: key embedded in bundle (private/personal use only)
-    endpoint = "https://api.anthropic.com/v1/messages"
-    headers  = {
-      "Content-Type":      "application/json",
-      "x-api-key":         apiKey,
-      "anthropic-version": "2023-06-01",
-    }
+    endpoint = "https://api.anthropic.com/v1/messages";
+    headers  = { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
   } else {
-    // Claude artifact sandbox — auth injected by sandbox
-    endpoint = "https://api.anthropic.com/v1/messages"
-    headers  = { "Content-Type": "application/json" }
+    endpoint = "https://api.anthropic.com/v1/messages";
+    headers  = { "Content-Type": "application/json" };
   }
 
   const res = await fetch(endpoint, {
@@ -152,9 +144,32 @@ async function fetchBookSummary(title, author) {
   if (data.error) throw new Error(data.error.message || "API error");
   const text = (data.content || []).map(b => b.type === "text" ? b.text : "").filter(Boolean).join("");
   if (!text) throw new Error("Empty response from API");
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("Could not find JSON in response");
-  return JSON.parse(match[0]);
+
+  // Robust extractor: walk brace depth to find the outermost { } block.
+  // Avoids the greedy-regex truncation bug that causes "Unexpected token" errors.
+  function extractJSON(str) {
+    const start = str.indexOf("{");
+    if (start === -1) return null;
+    let depth = 0;
+    for (let i = start; i < str.length; i++) {
+      if (str[i] === "{") depth++;
+      else if (str[i] === "}") { depth--; if (depth === 0) return str.slice(start, i + 1); }
+    }
+    return null;
+  }
+
+  const cleaned = text.replace(/```json\s*/gi, "").replace(/```\s*/g, "");
+  const jsonStr = extractJSON(cleaned);
+  if (!jsonStr) throw new Error("Could not find JSON in response");
+
+  try {
+    return JSON.parse(jsonStr);
+  } catch (e) {
+    // Salvage attempt: strip any trailing incomplete element then close the structure
+    const salvaged = jsonStr.replace(/,\s*[\[\{][^\]\}]*$/, "") + "]}";
+    try { return JSON.parse(salvaged); }
+    catch { throw new Error("Failed to parse response: " + e.message); }
+  }
 }
 
 // ─── SmartCover: fetches cover dynamically, shows placeholder while loading ───
